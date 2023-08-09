@@ -10,4 +10,4 @@ I'm into mathematics, computer science, bicycles, datasets, and visualizations. 
 
 ### Contact me
 
-[timothy.c.dunbar@protonmail.com](mailto:timothy.c.dunbar@protonmail.com)
+[timothy.c.dunbar@me.com](mailto:timothy.c.dunbar@me.com)
