@@ -36,8 +36,9 @@ footer-links:
 # You can find your shortname on the Settings page of your Disqus account
 disqus:
 
-# Enter your Google Analytics web tracking code (e.g. UA-2110908-2) to activate tracking
-google_analytics:
+# Enter your Google Analytics 4 measurement ID (e.g. G-XXXXXXXXXX) to activate tracking
+# Get your ID from: https://analytics.google.com/
+google_analytics: G-1EMREZNP9H
 
 # Your website URL (e.g. http://barryclark.github.io or http://www.barryclark.co)
 # Used for Sitemap.xml and your RSS feed
