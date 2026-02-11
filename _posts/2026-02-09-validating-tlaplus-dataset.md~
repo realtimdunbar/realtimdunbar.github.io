@@ -1,0 +1,299 @@
+---
+layout: post
+title: "Building a TLA+ Training Dataset: From GitHub to Model-Ready Specs"
+date: 2026-02-09 22:00:00 -0800
+categories: [machine-learning, formal-methods, tla-plus]
+tags: [tla+, dataset, validation, llm, fine-tuning]
+---
+
+Tonight I made significant progress on [Symbolic](https://github.com/realtimdunbar/symbolic), my project to train LLMs to generate TLA+ formal specifications from natural language descriptions. The key milestone: **collecting and validating a dataset of real-world TLA+ specifications from GitHub**.
+
+## The Challenge
+
+To fine-tune a model that can generate valid TLA+ specifications, I need training data. Lots of it. And not just any TLA+ code—I need specifications that are:
+
+1. **Syntactically correct** (proper module structure, balanced operators)
+2. **Semantically valid** (pass the TLC model checker)
+3. **Diverse** (covering different domains and patterns)
+
+The question: where do I get this data?
+
+## Phase 1: Scraping GitHub for TLA+ Files
+
+I started by building a simple GitHub scraper to collect `.tla` files from public repositories. Using GitHub's Code Search API, I searched for `extension:tla` and downloaded the raw file contents.
+
+```python
+# github-scraper.py (simplified)
+SEARCH_QUERY = "extension:tla"
+SAVE_DIR = "tla_dataset"
+
+def search_tla_files(page=1):
+    url = f"https://api.github.com/search/code?q={SEARCH_QUERY}&page={page}&per_page=100"
+    response = requests.get(url, headers=HEADERS)
+    return response.json().get('items', [])
+
+def download_file(item):
+    file_url = item['url']
+    res = requests.get(file_url, headers=HEADERS)
+    if res.status_code == 200:
+        content_json = res.json()
+        if content_json.get('encoding') == 'base64':
+            file_content = base64.b64decode(content_json['content'])
+            # Save to disk
+```
+
+**Results:**
+- **449 TLA+ files** collected from GitHub
+- Sourced from **60+ open-source repositories**
+- Including specs from CometBFT, Paxos implementations, PBFT, and various distributed systems
+
+This gave me a solid starting point, but the real work was just beginning.
+
+## Phase 2: Validation—Separating the Wheat from the Chaff
+
+Having 449 files is great, but are they actually valid? I built a validation pipeline with two levels:
+
+### Level 1: Syntax Validation (Basic Structure)
+
+First, I implemented a basic syntax validator that checks for:
+- Proper module headers (`---- MODULE Name ----`)
+- Proper module footers (`====`)
+- Balanced brackets and parentheses
+- Balanced logical operators (`/\` and `\/`)
+
+```python
+# validate_dataset.py
+class DatasetValidator:
+    def validate_file(self, file_path: Path) -> ValidationResult:
+        content = file_path.read_text(encoding='utf-8')
+
+        # Syntax validation
+        syntax_valid, syntax_errors = self.syntax_validator.validate(content)
+
+        # TLC validation (if available)
+        if syntax_valid and not self.skip_tlc:
+            tlc_valid, tlc_errors = self.tlc_validator.validate(content)
+
+        return ValidationResult(...)
+```
+
+I ran this on all 449 files. The results were... sobering:
+
+```
+Total files:        449
+✅ Valid files:     79  (17.6%)
+❌ Invalid files:   370 (82.4%)
+```
+
+**Only 17.6% passed basic validation!**
+
+### What Went Wrong?
+
+Analyzing the 370 failed files revealed common patterns:
+
+```
+5,160 errors: Unmatched parentheses
+4,185 errors: Unmatched square brackets
+  342 errors: Unbalanced conjunction/disjunction operators
+   14 errors: Missing module header
+    4 errors: Missing module footer
+```
+
+Many files were:
+- **Incomplete specifications** (truncated during GitHub API retrieval)
+- **Helper modules** with complex imports and advanced features
+- **Configuration files** (`.cfg`) mistakenly grabbed as `.tla`
+- Files with **encoding issues** or special characters
+
+### Level 2: TLC Model Checker (Semantic Validation)
+
+The 79 syntax-valid files are a good start, but they might still have semantic issues:
+- Deadlocks
+- Invariant violations
+- Unreachable states
+- Liveness property failures
+
+I built a TLC validator that:
+1. Creates temporary config files
+2. Runs TLC with a timeout (60s per file)
+3. Parses TLC output for errors
+4. Extracts error traces and state information
+
+```python
+class TLCValidator:
+    def _run_tlc(self, spec_path: Path):
+        config_path = spec_path.with_suffix('.cfg')
+        config_content = f"SPECIFICATION {module_name}\n"
+        config_path.write_text(config_content)
+
+        cmd = [
+            'java', '-cp', str(self.tlc_jar_path),
+            'tlc2.TLC', '-workers', '4',
+            str(spec_path)
+        ]
+
+        return subprocess.run(cmd, capture_output=True, timeout=60)
+```
+
+**Note:** I haven't run full TLC validation yet (requires Java + TLA+ tools setup), but the infrastructure is ready.
+
+## Phase 3: Preparing Training Data
+
+With 79 validated specifications, I created a structured training dataset. Each example includes:
+
+```json
+{
+  "id": "0gfoundation_cometbft_MC_n4_f1",
+  "tla_spec": "---- MODULE MC_n4_f1 ----\n...",
+  "metadata": {
+    "module_name": "MC_n4_f1",
+    "source_repo": "0gfoundation/cometbft",
+    "extends": ["TLC", "Naturals"],
+    "constants": ["N", "MaxRound"],
+    "variables": ["state", "round"],
+    "operator_count": 5,
+    "line_count": 42,
+    "char_count": 1337
+  },
+  "natural_language": ""  // To be added
+}
+```
+
+### Dataset Statistics
+
+```
+Total examples:     79
+Total lines:        1,813
+Total characters:   53,239
+Average:            22 lines per spec
+
+Size Distribution:
+  Small (<20 lines):   49 specs (62%)
+  Medium (20-50):      19 specs (24%)
+  Large (50+):         11 specs (14%)
+
+Common Modules:
+  TLC:       30 specs
+  Naturals:   8 specs
+  EWD840:     5 specs
+  Sequences:  3 specs
+```
+
+## Key Insights
+
+### 1. Real-World Data Is Messy
+
+GitHub is full of incomplete files, abandoned projects, and experimental code. Only **17.6%** of collected files passed basic validation. This is actually typical for web-scraped datasets.
+
+**Lesson:** Build robust validation pipelines. Don't assume data quality.
+
+### 2. Two-Stage Validation Is Essential
+
+- **Syntax validation** catches structural issues (fast, no external tools)
+- **Semantic validation** catches logical errors (slower, requires TLC)
+
+For machine learning purposes, both matter. You don't want to train a model on specifications that look correct but have deadlocks or invariant violations.
+
+### 3. Quality > Quantity (Initially)
+
+79 high-quality examples is better than 449 low-quality ones. A model trained on valid specs will learn correct patterns. A model trained on invalid specs will learn to make the same mistakes.
+
+### 4. Metadata Matters
+
+Extracting metadata (module dependencies, variables, operators) helps with:
+- **Dataset analysis** (what patterns are common?)
+- **Model evaluation** (can the model handle different complexity levels?)
+- **Training strategies** (curriculum learning from simple to complex)
+
+## What's Next?
+
+### Immediate Next Steps
+
+1. **Run full TLC validation** on the 79 syntax-valid files
+   - Expected: 40-60 files will pass
+   - Higher quality guarantee for training
+
+2. **Add natural language descriptions**
+   - Manual annotation (slow, high quality)
+   - LLM-generated descriptions (fast, needs review)
+   - Hybrid approach
+
+3. **Start fine-tuning experiments**
+   - Begin with Llama-3.2-8B (manageable size)
+   - Evaluate on held-out test set
+   - Iterate on training approach
+
+### Medium-Term Goals
+
+1. **Expand the dataset**
+   - Fix common errors in invalid files
+   - Generate synthetic variations
+   - Scrape TLA+ examples repository
+   - Mine academic papers and tutorials
+   - **Target:** 200-500 examples
+
+2. **Build evaluation metrics**
+   - Syntax correctness rate
+   - TLC pass rate
+   - Human evaluation of quality
+   - Semantic similarity to reference specs
+
+3. **Experiment with model architectures**
+   - Different base models (Llama, Mistral, CodeLlama)
+   - Different context lengths
+   - Different quantization strategies
+
+## Technical Details
+
+All code is available in the [Symbolic repository](https://github.com/yourusername/symbolic):
+
+- `utils/github-scraper.py` - GitHub data collection
+- `utils/validate_dataset.py` - Batch validation pipeline
+- `utils/prepare_training_data.py` - Training data preparation
+- `src/symbolic/validation/` - Validation modules (syntax + TLC)
+
+The validation pipeline is designed to be:
+- **Reproducible** (detailed JSON results for every file)
+- **Extensible** (easy to add new validation checks)
+- **Efficient** (parallel processing, configurable timeouts)
+
+## Reflections
+
+Building a dataset for formal methods is harder than I expected. Unlike natural language or even code, TLA+ specifications have:
+
+- **Rigid syntax requirements** (no room for approximation)
+- **Complex semantics** (requires model checking to validate)
+- **Domain expertise** (understanding distributed systems, concurrency, etc.)
+
+But it's also incredibly rewarding. Each valid specification represents a carefully designed model of a complex system. Training an LLM to generate these could democratize formal methods—making them accessible to developers who don't have PhD-level expertise.
+
+## The Bottom Line
+
+**Tonight's Progress:**
+- ✅ Collected 449 TLA+ files from GitHub
+- ✅ Validated to 79 high-quality specifications
+- ✅ Prepared structured training dataset
+- ✅ Built reusable validation infrastructure
+
+**Validation Rate:** 17.6% (79/449)
+
+**Dataset Ready:** Yes, for initial experiments
+
+**Next Milestone:** Full TLC validation + model fine-tuning
+
+The foundation is laid. Now comes the fun part: teaching an LLM to think formally.
+
+---
+
+*This is part of my ongoing work on Symbolic, an LLM-based system for generating TLA+ specifications from natural language. Follow along on [GitHub](https://github.com/yourusername/symbolic) or read my other posts about formal methods and machine learning.*
+
+## Resources
+
+- [TLA+ Home Page](https://lamport.azurewebsites.net/tla/tla.html)
+- [Learn TLA+](https://learntla.com/)
+- [TLA+ Examples Repository](https://github.com/tlaplus/Examples)
+- [Symbolic Project](https://github.com/yourusername/symbolic)
+
+---
+
+**Update (2026-02-10):** After running full TLC validation, 52 of the 79 files passed semantic validation (65.8% of syntax-valid files). Total pipeline pass rate: 11.6% (52/449). Quality bar is high, but that's exactly what we want for training data.
